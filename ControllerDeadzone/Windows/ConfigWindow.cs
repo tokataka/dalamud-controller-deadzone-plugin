@@ -250,13 +250,13 @@ public sealed class ConfigWindow : Window, IDisposable
 
             if (settings.Type == DeadzoneType.Radial)
             {
-                AddRadialZoneBand(drawList, center, maxZoneSize, new Vector2(radius, radius), maxZoneFillColor, 96);
+                AddRadialMaxZonePixels(drawList, center, radius, maxZoneSize, maxZoneFillColor);
                 AddEllipseFilled(drawList, center, deadzoneSize, deadzoneColor, 48);
                 AddEllipseFilled(drawList, center, antiDeadzoneSize, antiDeadzoneFillColor, 48);
             }
             else
             {
-                AddAxialMaxZoneBand(drawList, center, radius, settings, maxZoneFillColor, 128);
+                AddAxialMaxZonePixels(drawList, center, radius, settings, maxZoneFillColor);
                 AddAxialDeadzoneAxes(drawList, center, radius, deadzoneSize, deadzoneColor);
                 AddAxialDeadzoneAxes(drawList, center, radius, antiDeadzoneSize, antiDeadzoneFillColor);
             }
@@ -351,40 +351,25 @@ public sealed class ConfigWindow : Window, IDisposable
         drawList.PathFillConvex(color);
     }
 
-    private static void AddRadialZoneBand(
+    private static void AddRadialMaxZonePixels(
         ImDrawListPtr drawList,
         Vector2 center,
-        Vector2 deadzoneRadius,
-        Vector2 antiDeadzoneRadius,
-        uint color,
-        int segments)
+        float outerRadius,
+        Vector2 maxZoneRadius,
+        uint color)
     {
-        if (antiDeadzoneRadius.X <= deadzoneRadius.X && antiDeadzoneRadius.Y <= deadzoneRadius.Y)
+        if (outerRadius <= 0f || maxZoneRadius.X <= 0f || maxZoneRadius.Y <= 0f)
             return;
 
-        for (var i = 0; i < segments; i++)
+        AddPixelMask(drawList, center, outerRadius, color, offset =>
         {
-            var angle1 = MathF.Tau * i / segments;
-            var angle2 = MathF.Tau * (i + 1) / segments;
-            var direction1 = new Vector2(MathF.Cos(angle1), MathF.Sin(angle1));
-            var direction2 = new Vector2(MathF.Cos(angle2), MathF.Sin(angle2));
-            var deadRadius1 = GetEllipseRadius(deadzoneRadius, direction1);
-            var deadRadius2 = GetEllipseRadius(deadzoneRadius, direction2);
-            var antiRadius1 = GetEllipseRadius(antiDeadzoneRadius, direction1);
-            var antiRadius2 = GetEllipseRadius(antiDeadzoneRadius, direction2);
-            var active1 = antiRadius1 > deadRadius1;
-            var active2 = antiRadius2 > deadRadius2;
+            var distance = offset.Length();
+            if (distance <= 0f)
+                return false;
 
-            if (!active1 && !active2)
-                continue;
-
-            var inner1 = center + direction1 * (active1 ? deadRadius1 : antiRadius1);
-            var outer1 = center + direction1 * antiRadius1;
-            var outer2 = center + direction2 * antiRadius2;
-            var inner2 = center + direction2 * (active2 ? deadRadius2 : antiRadius2);
-
-            drawList.AddQuadFilled(outer1, outer2, inner2, inner1, color);
-        }
+            var innerRadius = GetEllipseRadius(maxZoneRadius, offset / distance);
+            return distance > innerRadius;
+        });
     }
 
     private static float GetEllipseRadius(Vector2 radius, Vector2 direction)
@@ -397,38 +382,64 @@ public sealed class ConfigWindow : Window, IDisposable
         return denominator <= 0f ? 0f : 1f / MathF.Sqrt(denominator);
     }
 
-    private static void AddAxialMaxZoneBand(
+    private static void AddAxialMaxZonePixels(
         ImDrawListPtr drawList,
         Vector2 center,
         float radius,
         StickSettings settings,
-        uint color,
-        int segments)
+        uint color)
     {
-        if (radius <= 0f || segments < 3)
+        if (radius <= 0f)
             return;
 
-        for (var i = 0; i < segments; i++)
+        AddPixelMask(drawList, center, radius, color, offset =>
         {
-            var angle1 = MathF.Tau * i / segments;
-            var angle2 = MathF.Tau * (i + 1) / segments;
-            var direction1 = new Vector2(MathF.Cos(angle1), MathF.Sin(angle1));
-            var direction2 = new Vector2(MathF.Cos(angle2), MathF.Sin(angle2));
-            var innerRadius1 = DeadzoneProcessor.FindAxialMaxBoundaryRadius(direction1, settings);
-            var innerRadius2 = DeadzoneProcessor.FindAxialMaxBoundaryRadius(direction2, settings);
+            var distance = offset.Length();
+            if (distance <= 0f)
+                return false;
 
-            if (innerRadius1 >= 1f && innerRadius2 >= 1f)
-                continue;
+            var boundary = DeadzoneProcessor.FindAxialMaxBoundaryRadius(offset / distance, settings) * radius;
+            return distance > boundary;
+        });
+    }
 
-            innerRadius1 = Math.Clamp(innerRadius1, 0f, 1f);
-            innerRadius2 = Math.Clamp(innerRadius2, 0f, 1f);
+    private static void AddPixelMask(
+        ImDrawListPtr drawList,
+        Vector2 center,
+        float radius,
+        uint color,
+        Func<Vector2, bool> shouldFill)
+    {
+        var minX = (int)MathF.Floor(center.X - radius);
+        var maxX = (int)MathF.Ceiling(center.X + radius);
+        var minY = (int)MathF.Floor(center.Y - radius);
+        var maxY = (int)MathF.Ceiling(center.Y + radius);
+        var radiusSquared = radius * radius;
 
-            drawList.AddQuadFilled(
-                center + direction1 * radius,
-                center + direction2 * radius,
-                center + direction2 * (innerRadius2 * radius),
-                center + direction1 * (innerRadius1 * radius),
-                color);
+        for (var y = minY; y < maxY; y++)
+        {
+            int? runStart = null;
+            for (var x = minX; x < maxX; x++)
+            {
+                var sample = new Vector2(x + 0.5f, y + 0.5f);
+                var offset = sample - center;
+                var fill = offset.LengthSquared() < radiusSquared && shouldFill(offset);
+
+                if (fill)
+                {
+                    runStart ??= x;
+                    continue;
+                }
+
+                if (runStart != null)
+                {
+                    drawList.AddRectFilled(new Vector2(runStart.Value, y), new Vector2(x, y + 1), color);
+                    runStart = null;
+                }
+            }
+
+            if (runStart != null)
+                drawList.AddRectFilled(new Vector2(runStart.Value, y), new Vector2(maxX, y + 1), color);
         }
     }
 

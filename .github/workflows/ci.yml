@@ -13,7 +13,8 @@ permissions:
   contents: read
 
 env:
-  PROJECT_FILE: ControllerDeadzone/ControllerDeadzone.csproj
+  SOLUTION_FILE: ControllerDeadzone.slnx
+  TEST_PROJECT: ControllerDeadzone.Tests/ControllerDeadzone.Tests.csproj
   DALAMUD_DISTRIB_URL: https://goatcorp.github.io/dalamud-distrib/latest.zip
 
 jobs:
@@ -29,7 +30,10 @@ jobs:
         uses: ./.github/actions/setup-plugin-build
 
       - name: Restore
-        run: dotnet restore $env:PROJECT_FILE --locked-mode
+        run: dotnet restore $env:SOLUTION_FILE --locked-mode
 
       - name: Build
-        run: dotnet build $env:PROJECT_FILE -c Release --no-restore -p:Platform=x64
+        run: dotnet build $env:SOLUTION_FILE -c Release --no-restore -p:Platform=x64
+
+      - name: Test
+        run: dotnet run --project $env:TEST_PROJECT -c Release --no-build -p:Platform=x64
