@@ -1,0 +1,6 @@
+bin/
+obj/
+.vs/
+.codex-build/
+.tmp-ffxivclientstructs/
+.tmp-dalamud/

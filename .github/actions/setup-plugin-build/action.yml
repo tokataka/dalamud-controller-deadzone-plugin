@@ -1,0 +1,22 @@
+name: Setup plugin build
+description: Setup .NET and Dalamud dependencies for plugin builds.
+
+runs:
+  using: composite
+  steps:
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: 10.0.x
+
+    - name: Download Dalamud
+      shell: pwsh
+      run: |
+        $dalamudHome = Join-Path $env:RUNNER_TEMP "dalamud"
+        $zipPath = Join-Path $env:RUNNER_TEMP "dalamud.zip"
+
+        Invoke-WebRequest -Uri $env:DALAMUD_DISTRIB_URL -OutFile $zipPath
+        New-Item -ItemType Directory -Force -Path $dalamudHome | Out-Null
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $dalamudHome -Force
+
+        "DALAMUD_HOME=$dalamudHome" >> $env:GITHUB_ENV

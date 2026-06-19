@@ -1,0 +1,77 @@
+name: Sync download count
+run-name: Sync download count
+
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PLUGIN_REPOSITORY: ${{ github.repository_owner }}/MyDalamudPlugins
+
+jobs:
+  sync:
+    name: Sync release download counts
+    runs-on: ubuntu-latest
+    env:
+      DISPATCH_TOKEN: ${{ secrets.PLUGIN_REPOSITORY_DISPATCH_TOKEN }}
+
+    steps:
+      - name: Read release download counts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releasePages = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --paginate --slurp | ConvertFrom-Json
+          $releases = @($releasePages | ForEach-Object { $_ })
+          $totalDownloadCount = 0
+          $assetCount = 0
+
+          foreach ($release in $releases) {
+            if ($release.draft) {
+              continue
+            }
+
+            $asset = $release.assets | Where-Object { $_.name -eq "latest.zip" } | Select-Object -First 1
+            if ($null -eq $asset) {
+              Write-Host "Skipping $($release.tag_name); latest.zip was not found."
+              continue
+            }
+
+            $downloadCount = [int]$asset.download_count
+            $totalDownloadCount += $downloadCount
+            $assetCount += 1
+            Write-Host "$($release.tag_name): $downloadCount downloads"
+          }
+
+          if ($assetCount -eq 0) {
+            throw "No release assets named latest.zip were found."
+          }
+
+          Write-Host "Total latest.zip downloads across $assetCount releases: $totalDownloadCount"
+
+          $payloadPath = Join-Path $env:RUNNER_TEMP "download-count-payload.json"
+          @{
+            event_type = "plugin-download-count"
+            client_payload = @{
+              plugins = @(
+                @{
+                  internal_name = "ControllerDeadzone"
+                  download_count = $totalDownloadCount
+                }
+              )
+            }
+          } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $payloadPath -Encoding utf8
+
+          "DOWNLOAD_COUNT_PAYLOAD=$payloadPath" >> $env:GITHUB_ENV
+
+      - name: Notify plugin repository
+        if: env.DISPATCH_TOKEN != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.PLUGIN_REPOSITORY_DISPATCH_TOKEN }}
+        run: |
+          gh api "repos/$env:PLUGIN_REPOSITORY/dispatches" --method POST --input "$env:DOWNLOAD_COUNT_PAYLOAD"

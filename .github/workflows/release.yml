@@ -1,0 +1,163 @@
+name: Release
+run-name: ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PROJECT_FILE: ControllerDeadzone/ControllerDeadzone.csproj
+  PLUGIN_JSON: ControllerDeadzone/ControllerDeadzone.json
+  CHANGELOG_FILE: CHANGELOG.md
+  PLUGIN_REPOSITORY: ${{ github.repository_owner }}/MyDalamudPlugins
+  DALAMUD_DISTRIB_URL: https://goatcorp.github.io/dalamud-distrib/latest.zip
+
+jobs:
+  release:
+    name: Build and release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    env:
+      DISPATCH_TOKEN: ${{ secrets.PLUGIN_REPOSITORY_DISPATCH_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup plugin build
+        uses: ./.github/actions/setup-plugin-build
+
+      - name: Restore
+        run: dotnet restore $env:PROJECT_FILE --locked-mode
+
+      - name: Build
+        run: dotnet build $env:PROJECT_FILE -c Release --no-restore -p:Platform=x64
+
+      - name: Prepare release metadata
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content -LiteralPath $env:PROJECT_FILE
+          $version = $project.Project.PropertyGroup.Version
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "Project version was not found in $env:PROJECT_FILE."
+          }
+
+          $sdk = [string]$project.Project.Sdk
+          $apiLevel = 15
+          if ($sdk -match "Dalamud\.NET\.Sdk/(\d+)\.") {
+            $apiLevel = [int]$Matches[1]
+          }
+
+          $plugin = Get-Content -Raw -LiteralPath $env:PLUGIN_JSON | ConvertFrom-Json
+          $internalName = [System.IO.Path]::GetFileNameWithoutExtension($env:PLUGIN_JSON)
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -ne "v$version") {
+            throw "Tag $tag does not match project Version $version."
+          }
+
+          $zip = Get-ChildItem -Path "ControllerDeadzone/bin/x64/Release" -Recurse -Filter "latest.zip" |
+            Select-Object -First 1
+
+          if ($null -eq $zip) {
+            throw "latest.zip was not produced by the release build."
+          }
+
+          $releaseUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"
+          $zipUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/latest.zip"
+          $metadataUrl = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$env:GITHUB_SHA/$env:PLUGIN_JSON"
+          $iconUrl = "https://raw.githubusercontent.com/$env:GITHUB_REPOSITORY/$env:GITHUB_SHA/images/icon.png"
+          $changelog = ""
+
+          if (Test-Path -LiteralPath $env:CHANGELOG_FILE) {
+            $content = Get-Content -Raw -LiteralPath $env:CHANGELOG_FILE
+            $escapedVersion = [regex]::Escape($version)
+            $pattern = "(?ms)^##\s+\[?v?$escapedVersion\]?(?:[ \t]+-[ \t]+[^\r\n]+)?[ \t]*\r?\n(?<body>.*?)(?=^##\s+|\z)"
+            $match = [regex]::Match($content, $pattern)
+            if ($match.Success) {
+              $changelog = $match.Groups["body"].Value.Trim()
+            }
+          }
+
+          $releaseNotesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          if ([string]::IsNullOrWhiteSpace($changelog)) {
+            "Automated build from commit $env:GITHUB_SHA." | Set-Content -LiteralPath $releaseNotesPath -Encoding utf8
+          } else {
+            $changelog | Set-Content -LiteralPath $releaseNotesPath -Encoding utf8
+          }
+
+          "PLUGIN_VERSION=$version" >> $env:GITHUB_ENV
+          "PLUGIN_NAME=$($plugin.Name)" >> $env:GITHUB_ENV
+          "PLUGIN_INTERNAL_NAME=$internalName" >> $env:GITHUB_ENV
+          "DALAMUD_API_LEVEL=$apiLevel" >> $env:GITHUB_ENV
+          "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+          "RELEASE_TITLE=$tag" >> $env:GITHUB_ENV
+          "RELEASE_URL=$releaseUrl" >> $env:GITHUB_ENV
+          "SOURCE_REPOSITORY_URL=https://github.com/$env:GITHUB_REPOSITORY" >> $env:GITHUB_ENV
+          "ZIP_PATH=$($zip.FullName)" >> $env:GITHUB_ENV
+          "ZIP_URL=$zipUrl" >> $env:GITHUB_ENV
+          "METADATA_URL=$metadataUrl" >> $env:GITHUB_ENV
+          "ICON_URL=$iconUrl" >> $env:GITHUB_ENV
+          "RELEASE_NOTES_PATH=$releaseNotesPath" >> $env:GITHUB_ENV
+
+          $delimiter = [guid]::NewGuid().ToString()
+          "CHANGELOG_CONTENT<<$delimiter" >> $env:GITHUB_ENV
+          $changelog >> $env:GITHUB_ENV
+          $delimiter >> $env:GITHUB_ENV
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release $env:RELEASE_TAG already exists. Bump the project Version before merging to master."
+          }
+
+          gh release create $env:RELEASE_TAG `
+            "$env:ZIP_PATH#latest.zip" `
+            --title "$env:RELEASE_TITLE" `
+            --notes-file "$env:RELEASE_NOTES_PATH" `
+            --target "$env:GITHUB_SHA"
+
+      - name: Notify plugin repository
+        if: env.DISPATCH_TOKEN != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.PLUGIN_REPOSITORY_DISPATCH_TOKEN }}
+        run: |
+          $pluginPayload = @{
+            internal_name = $env:PLUGIN_INTERNAL_NAME
+            version = $env:PLUGIN_VERSION
+            source = @{
+              repository_url = $env:SOURCE_REPOSITORY_URL
+              commit = $env:GITHUB_SHA
+            }
+            release = @{
+              tag = $env:RELEASE_TAG
+              zip_url = $env:ZIP_URL
+            }
+            manifest = @{
+              metadata_url = $env:METADATA_URL
+              icon_url = $env:ICON_URL
+              dalamud_api_level = [int]$env:DALAMUD_API_LEVEL
+            }
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($env:CHANGELOG_CONTENT)) {
+            $pluginPayload.changelog = $env:CHANGELOG_CONTENT
+          }
+
+          $payload = @{
+            event_type = "plugin-release"
+            client_payload = @{
+              plugins = @($pluginPayload)
+            }
+          } | ConvertTo-Json -Depth 10
+
+          $payload | gh api "repos/$env:PLUGIN_REPOSITORY/dispatches" --method POST --input -

@@ -1,0 +1,35 @@
+name: CI
+run-name: ${{ github.ref_name }}
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+env:
+  PROJECT_FILE: ControllerDeadzone/ControllerDeadzone.csproj
+  DALAMUD_DISTRIB_URL: https://goatcorp.github.io/dalamud-distrib/latest.zip
+
+jobs:
+  build:
+    name: Build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup plugin build
+        uses: ./.github/actions/setup-plugin-build
+
+      - name: Restore
+        run: dotnet restore $env:PROJECT_FILE --locked-mode
+
+      - name: Build
+        run: dotnet build $env:PROJECT_FILE -c Release --no-restore -p:Platform=x64
